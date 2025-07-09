@@ -1,0 +1,154 @@
+this is what we have now. instead of print, we want to save all results to local file, including results and error logs
+
+import pandas as pd
+from pathlib import Path
+
+def process_design_files(folder="Design"):
+    folder_path = Path(folder)
+    excel_files = list(folder_path.glob("*.xls")) + list(folder_path.glob("*.xlsx"))
+
+    missing_sheet_files = []
+    no_correlation_files = []
+    extracted_results = []
+
+    for file in excel_files:
+        try:
+            engine = "openpyxl" if file.suffix == ".xlsx" else "xlrd"
+
+            xl = pd.ExcelFile(file, engine=engine)
+            if "DesignSheet" not in xl.sheet_names:
+                missing_sheet_files.append(file.name)
+                continue
+
+            df = xl.parse(sheet_name="DesignSheet", header=None)
+
+            h36_value = str(df.iat[35, 7])
+            if " / " not in h36_value:
+                no_correlation_files.append(file.name)
+                continue
+
+            result = extract_design_data(df)
+            result["filename"] = file.name
+            extracted_results.append(result)
+
+        except Exception as e:
+            print(f"Error processing {file.name}: {e}")
+
+    # Summary logs
+    if missing_sheet_files:
+        print("\nFiles missing 'DesignSheet':")
+        for f in missing_sheet_files:
+            print(f"- {f}")
+
+    if no_correlation_files:
+        print("\nFiles with invalid H36 (no ' / '):")
+        for f in no_correlation_files:
+            print(f"- {f}")
+
+    return extracted_results
+
+
+def extract_design_data(df: pd.DataFrame) -> dict:
+    try:
+        data = {
+            "pole": df.iat[4, 0],             # A5
+            "hp": df.iat[4, 1],               # B5
+            "rpm": df.iat[4, 2],              # C5
+            "voltage": df.iat[4, 4],          # E5
+            "frequency": df.iat[4, 5],        # F5
+            "frame": df.iat[4, 9],            # J5
+            "airgap": df.iat[7, 1],           # B8
+            "core": df.iat[9, 1],             # B10
+            "stator_od": df.iat[10, 1],       # B11
+            "stator_id": df.iat[11, 1],       # B12
+            "stator_core_depth": df.iat[12, 1],  # B13
+            "rotor_od": df.iat[10, 2],        # C11
+            "rotor_id": df.iat[11, 2],        # C12
+            "rotor_core_depth": df.iat[12, 2],   # C13
+            "stator_slot_num": df.iat[15, 1], # B16
+            "rotor_slot_num": df.iat[15, 2],  # C16
+            "stator_slot_shape": df.iat[16, 1],  # B17
+            "rotor_slot_shape": df.iat[16, 2],   # C17
+            "stator_slot_depth": df.iat[18, 1],  # B19
+            "rotor_slot_depth": df.iat[18, 2],   # C19
+            "stator_slot_width": df.iat[20, 1],  # B21
+            "stator_tip_depth": df.iat[21, 1],   # B22
+            "rotor_tip_depth": df.iat[21, 2],    # C22
+            "low_cage_depth": df.iat[54, 3],        # D55
+            "low_cage_upper_width": df.iat[52, 3],  # D53
+            "low_cage_lower_width": df.iat[53, 3],  # D54
+            "mid_tooth_width": df.iat[53, 5],       # F54
+            "stray_loss": df.iat[37, 9],         # J38
+            "wdg_temp_rise": df.iat[34, 4],      # E35
+            "core_loss": df.iat[36, 9],          # J37
+            "flux_pri_core": df.iat[29, 6],      # G30
+            "flux_pri_tooth": df.iat[30, 6],     # G31
+            "flux_sec_core": df.iat[31, 6],      # G32
+            "flux_sec_tooth": df.iat[32, 6],     # G33
+            "flux_air_gap": df.iat[33, 6],       # G34
+        }
+
+        # Extract numeric value after " / " for loss values in H35–H38
+        def extract_loss(val):
+            try:
+                if isinstance(val, str) and " / " in val:
+                    return float(val.split(" / ")[1].strip())
+                return float(val)
+            except:
+                return None
+
+        data["no_load_loss"] = extract_loss(df.iat[34, 7])  # H35
+        data["pri_loss"] = extract_loss(df.iat[35, 7])      # H36
+        data["sec_loss"] = extract_loss(df.iat[36, 7])      # H37
+        data["fri_wdg_loss"] = extract_loss(df.iat[37, 7])  # H38
+
+        # Convert loss components to numbers
+        pri = data.get("pri_loss", 0) or 0
+        sec = data.get("sec_loss", 0) or 0
+        core = data.get("core_loss", 0) or 0
+        fri = data.get("fri_wdg_loss", 0) or 0
+        stray = data.get("stray_loss", 0) or 0
+
+        total_loss = pri + sec + core + fri + stray
+        data["total_loss"] = total_loss
+
+        if total_loss > 0:
+            data["pri_loss_pct"] = pri / total_loss
+            data["sec_loss_pct"] = sec / total_loss
+            data["core_loss_pct"] = core / total_loss
+            data["fri_wdg_loss_pct"] = fri / total_loss
+            data["stray_loss_pct"] = stray / total_loss
+        else:
+            data["pri_loss_pct"] = None
+            data["sec_loss_pct"] = None
+            data["core_loss_pct"] = None
+            data["fri_wdg_loss_pct"] = None
+            data["stray_loss_pct"] = None
+
+        # Ratios
+        try:
+            rotor_core_depth = float(data["rotor_core_depth"])
+            rotor_slot_depth = float(data["rotor_slot_depth"])
+            mid_tooth_width = float(data["mid_tooth_width"])
+
+            data["rotor_slot_core_ratio"] = (
+                rotor_slot_depth / rotor_core_depth if rotor_core_depth else None
+            )
+            data["rotor_tooth_width_depth_ratio"] = (
+                mid_tooth_width / rotor_slot_depth if rotor_slot_depth else None
+            )
+        except Exception:
+            data["rotor_slot_core_ratio"] = None
+            data["rotor_tooth_width_depth_ratio"] = None
+
+        return data
+
+    except Exception as e:
+        print(f"Error in extract_design_data: {e}")
+        return {}
+
+if __name__ == "__main__":
+    results = process_design_files("Design")
+    df_results = pd.DataFrame(results)
+    print(df_results.head())
+
